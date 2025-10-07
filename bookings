@@ -1,0 +1,1985 @@
+import React, { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import { auth, db } from "../../firebase"; 
+import {
+  CheckCircle2, XCircle, MessageSquare, Calendar, Car,
+  DollarSign, Mail, FileText, Clock, MapPin,
+  CalendarDays, Filter, X, AlertTriangle, Info,
+  CreditCard, Shield, Wallet, Play
+} from "lucide-react";
+import { 
+  collection, query, where, getDocs, doc, updateDoc,
+  onSnapshot, getDoc, Timestamp 
+} from "firebase/firestore";
+// ADD THIS IMPORT for Firebase Functions
+import { getFunctions, httpsCallable } from 'firebase/functions';
+import SidebarOwner from "../global/SidebarOwner";
+import TopbarOwner from "../global/TopbarOwner";
+import Swal from 'sweetalert2';
+
+const Bookings = () => {
+  const [bookings, setBookings] = useState([]);
+  const [vehicleData, setVehicleData] = useState({});
+  const [userData, setUserData] = useState({});
+  const [activeFilter, setActiveFilter] = useState("pending"); 
+  const [showDateFilter, setShowDateFilter] = useState(false);
+  const [dateFilter, setDateFilter] = useState({
+    startDate: "",
+    endDate: ""
+  });
+  const [activeDateFilter, setActiveDateFilter] = useState(null);
+  const [selectedBooking, setSelectedBooking] = useState(null);
+  const [showDetailModal, setShowDetailModal] = useState(false);
+  const [conflictingBookings, setConflictingBookings] = useState({});
+  const [showConflictWarning, setShowConflictWarning] = useState(false);
+  const navigate = useNavigate();
+
+  // Deposit status configuration
+  const depositStatusConfig = {
+    paid: { 
+      label: "Paid", 
+      color: "text-green-600", 
+      bgColor: "bg-green-50", 
+      icon: <CheckCircle2 className="w-4 h-4" /> 
+    },
+    lack: { 
+      label: "Lack", 
+      color: "text-amber-600", 
+      bgColor: "bg-amber-50", 
+      icon: <AlertTriangle className="w-4 h-4" /> 
+    },
+    not_paid: { 
+      label: "Not Paid", 
+      color: "text-red-600", 
+      bgColor: "bg-red-50", 
+      icon: <XCircle className="w-4 h-4" /> 
+    }
+  };
+
+  // SweetAlert2 configuration - UPDATED with deposit info, payment verification, and Active status
+  const showSweetAlert = {
+    // Accept booking confirmation with deposit info and payment verification
+    acceptBooking: (booking, hasConflict = false) => {
+      const basePrice = booking.dailyPrice || booking.rentalAmount || 0;
+      const depositAmount = booking.depositAmount || 0;
+      const remainingBalance = basePrice - depositAmount;
+      const hasDeposit = booking.depositStatus === 'paid' && depositAmount > 0;
+      
+      const conflictWarning = hasConflict 
+        ? `<div class="bg-red-50 p-3 rounded-lg mt-3 border border-red-200">
+             <p class="text-red-800 text-sm font-medium">⚠️ Date Conflict Warning</p>
+             <p class="text-red-700 text-sm">This booking has overlapping dates with other bookings.</p>
+           </div>` 
+        : '';
+      
+      const paymentWarning = booking.depositStatus !== 'paid'
+        ? `<div class="bg-yellow-50 p-3 rounded-lg mt-3 border border-yellow-300">
+             <p class="text-yellow-800 text-sm font-medium">⚠️ Payment Not Confirmed</p>
+             <p class="text-yellow-700 text-sm">The client has not yet paid or confirmed their deposit payment.</p>
+             <p class="text-yellow-700 text-sm mt-1"><strong>Are you sure you want to accept this booking?</strong></p>
+           </div>`
+        : '';
+      
+      const depositInfo = hasDeposit
+        ? `<div class="bg-green-50 p-3 rounded-lg mt-3 border border-green-200">
+             <p class="text-green-800 text-sm font-medium">💰 Payment Breakdown</p>
+             <p class="text-green-700 text-sm">Base Price: ₱${basePrice}</p>
+             <p class="text-green-700 text-sm">Deposit Paid: -₱${depositAmount}</p>
+             <p class="text-green-800 text-sm font-semibold mt-1">Remaining Balance: ₱${remainingBalance}</p>
+           </div>`
+        : `<div class="bg-blue-50 p-3 rounded-lg mt-3 border border-blue-200">
+             <p class="text-blue-800 text-sm font-medium">💰 Deposit Status: ${depositStatusConfig[booking.depositStatus]?.label || 'Not Set'}</p>
+             <p class="text-blue-700 text-sm">Total Amount: ₱${basePrice}</p>
+           </div>`;
+      
+      return Swal.fire({
+        title: 'Accept Booking?',
+        html: `
+          <div class="text-left">
+            <p class="mb-2"><strong>Customer:</strong> ${booking.name}</p>
+            <p class="mb-2"><strong>Vehicle:</strong> ${booking.vehicleBrand} ${booking.vehicleModel}</p>
+            ${depositInfo}
+            ${paymentWarning}
+            ${conflictWarning}
+          </div>
+        `,
+        icon: booking.depositStatus !== 'paid' ? 'warning' : (hasConflict ? 'warning' : 'question'),
+        showCancelButton: true,
+        confirmButtonText: booking.depositStatus !== 'paid' ? 'Accept Without Payment' : (hasConflict ? 'Accept Anyway' : 'Accept Booking'),
+        confirmButtonColor: booking.depositStatus !== 'paid' ? '#f59e0b' : (hasConflict ? '#f59e0b' : '#3b82f6'),
+        cancelButtonText: 'Cancel',
+        cancelButtonColor: '#6b7280',
+        reverseButtons: true,
+        focusCancel: booking.depositStatus !== 'paid' || hasConflict,
+        customClass: {
+          popup: 'swal2-popup-custom',
+          htmlContainer: 'text-sm'
+        }
+      });
+    },
+
+    // Update deposit status
+    updateDepositStatus: (booking) => {
+      return Swal.fire({
+        title: 'Update Deposit Status',
+        html: `
+          <div class="text-left mb-4">
+            <p class="mb-2"><strong>Customer:</strong> ${booking.name}</p>
+            <p class="mb-2"><strong>Vehicle:</strong> ${booking.vehicleBrand} ${booking.vehicleModel}</p>
+            <p class="mb-2"><strong>Current Status:</strong> 
+              <span class="${depositStatusConfig[booking.depositStatus]?.color || 'text-gray-600'}">
+                ${depositStatusConfig[booking.depositStatus]?.label || 'Not Set'}
+              </span>
+            </p>
+          </div>
+          <div class="space-y-2">
+            <select id="depositStatus" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+              <option value="not_paid" ${booking.depositStatus === 'not_paid' ? 'selected' : ''}>Not Paid</option>
+              <option value="lack" ${booking.depositStatus === 'lack' ? 'selected' : ''}>Lack</option>
+              <option value="paid" ${booking.depositStatus === 'paid' ? 'selected' : ''}>Paid</option>
+            </select>
+            <input type="number" id="depositAmount" 
+                   placeholder="Deposit Amount (require)" 
+                   value="${booking.depositAmount || ''}"
+                   class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                   min="0" step="0.01">
+          </div>
+        `,
+        icon: 'info',
+        showCancelButton: true,
+        confirmButtonText: 'Update Deposit',
+        confirmButtonColor: '#3b82f6',
+        cancelButtonText: 'Cancel',
+        cancelButtonColor: '#6b7280',
+        reverseButtons: true,
+        preConfirm: () => {
+          const status = document.getElementById('depositStatus').value;
+          const amount = document.getElementById('depositAmount').value;
+          return { status, amount: amount ? parseFloat(amount) : null };
+        }
+      });
+    },
+
+    // Cancel booking confirmation
+    cancelBooking: (booking) => {
+      return Swal.fire({
+        title: 'Cancel Booking?',
+        html: `
+          <div class="text-left">
+            <p class="mb-2"><strong>Customer:</strong> ${booking.name}</p>
+            <p class="mb-2"><strong>Vehicle:</strong> ${booking.vehicleBrand} ${booking.vehicleModel}</p>
+            <p class="text-red-600 text-sm mt-3">⚠️ This action cannot be undone.</p>
+          </div>
+        `,
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonText: 'Yes, Cancel Booking',
+        confirmButtonColor: '#dc2626',
+        cancelButtonText: 'Keep Booking',
+        cancelButtonColor: '#6b7280',
+        reverseButtons: true,
+        focusCancel: true
+      });
+    },
+
+    // Complete booking confirmation
+    completeBooking: (booking, isOverdue = false) => {
+      const basePrice = booking.dailyPrice || booking.rentalAmount || 0;
+      const depositAmount = booking.depositAmount || 0;
+      const overdueAmount = isOverdue ? helpers.calculateOverdueAmount(booking) : 0;
+      const remainingBalance = basePrice - depositAmount;
+      const totalAmount = remainingBalance + overdueAmount;
+      
+      return Swal.fire({
+        title: 'Complete Booking?',
+        html: `
+          <div class="text-left">
+            <p class="mb-2"><strong>Customer:</strong> ${booking.name}</p>
+            <p class="mb-2"><strong>Vehicle:</strong> ${booking.vehicleBrand} ${booking.vehicleModel}</p>
+            <p class="mb-2"><strong>Base Price:</strong> ₱${basePrice}</p>
+            ${depositAmount > 0 ? `<p class="mb-2 text-green-600"><strong>Deposit Paid:</strong> -₱${depositAmount}</p>` : ''}
+            ${depositAmount > 0 ? `<p class="mb-2"><strong>Remaining Balance:</strong> ₱${remainingBalance}</p>` : ''}
+            ${isOverdue ? `<p class="mb-2 text-red-600"><strong>Overdue Charges:</strong> ₱${overdueAmount}</p>` : ''}
+            <p class="mb-2 text-lg font-bold"><strong>Total to Collect:</strong> ₱${totalAmount}</p>
+            <p class="text-green-600 text-sm mt-3">✅ Mark this booking as completed.</p>
+          </div>
+        `,
+        icon: 'success',
+        showCancelButton: true,
+        confirmButtonText: 'Mark as Completed',
+        confirmButtonColor: '#10b981',
+        cancelButtonText: 'Cancel',
+        cancelButtonColor: '#6b7280',
+        reverseButtons: true
+      });
+    },
+
+    // Overdue notification
+    bookingOverdue: (booking) => {
+      return Swal.fire({
+        title: 'Booking Overdue!',
+        html: `
+          <div class="text-left">
+            <p class="mb-2"><strong>Customer:</strong> ${booking.name}</p>
+            <p class="mb-2"><strong>Vehicle:</strong> ${booking.vehicleBrand} ${booking.vehicleModel}</p>
+            <p class="mb-2"><strong>Overdue Hours:</strong> ${booking.overdueHours || 0}</p>
+            <p class="mb-2"><strong>Additional Charges:</strong> ₱${booking.overdueCharge || 0}</p>
+            <p class="text-red-600 text-sm mt-3">⚠️ This booking is now overdue.</p>
+          </div>
+        `,
+        icon: 'warning',
+        timer: 10000,
+        timerProgressBar: true,
+        toast: true,
+        position: 'top-end',
+        showConfirmButton: false
+      });
+    },
+
+    // Active booking notification
+    bookingActivated: (booking) => {
+      return Swal.fire({
+        title: 'Booking Now Active!',
+        html: `
+          <div class="text-left">
+            <p class="mb-2"><strong>Customer:</strong> ${booking.name}</p>
+            <p class="mb-2"><strong>Vehicle:</strong> ${booking.vehicleBrand} ${booking.vehicleModel}</p>
+            <p class="mb-2"><strong>Start Time:</strong> ${helpers.formatDateTime(helpers.parseBookingDateTime(helpers.getBookingDates(booking).pickupDate, helpers.getBookingDates(booking).pickupTime))}</p>
+            <p class="text-green-600 text-sm mt-3">🚗 This booking is now active and in progress.</p>
+          </div>
+        `,
+        icon: 'success',
+        timer: 8000,
+        timerProgressBar: true,
+        toast: true,
+        position: 'top-end',
+        showConfirmButton: false
+      });
+    },
+
+    // Auto-cancel notification
+    autoCancelNotification: (booking) => {
+      return Swal.fire({
+        title: 'Booking Auto-Cancelled',
+        html: `
+          <div class="text-left">
+            <p class="mb-2"><strong>Customer:</strong> ${booking.name}</p>
+            <p class="mb-2"><strong>Vehicle:</strong> ${booking.vehicleBrand} ${booking.vehicleModel}</p>
+            <p class="mb-2"><strong>Start Date:</strong> ${helpers.formatDate(helpers.getBookingDates(booking).pickupDate)}</p>
+            <p class="text-orange-600 text-sm mt-3">📅 This pending booking was automatically cancelled because the start date has passed.</p>
+          </div>
+        `,
+        icon: 'info',
+        timer: 10000,
+        timerProgressBar: true,
+        toast: true,
+        position: 'top-end',
+        showConfirmButton: false,
+        customClass: {
+          popup: 'swal2-toast-custom'
+        }
+      });
+    },
+
+    // Success messages
+    success: (action, booking) => {
+      const messages = {
+        accepted: {
+          title: 'Booking Accepted!',
+          text: `${booking.name}'s booking has been successfully accepted.`,
+          icon: 'success'
+        },
+        cancelled: {
+          title: 'Booking Cancelled',
+          text: `${booking.name}'s booking has been cancelled.`,
+          icon: 'info'
+        },
+        completed: {
+          title: 'Booking Completed!',
+          text: `${booking.name}'s booking has been marked as completed.`,
+          icon: 'success'
+        },
+        activated: {
+          title: 'Booking Activated!',
+          text: `${booking.name}'s booking is now active.`,
+          icon: 'success'
+        },
+        deposit_updated: {
+          title: 'Deposit Updated!',
+          text: `Deposit status has been updated successfully.`,
+          icon: 'success'
+        }
+      };
+      
+      return Swal.fire({
+        ...messages[action],
+        timer: 3000,
+        timerProgressBar: true,
+        showConfirmButton: false,
+        toast: true,
+        position: 'top-end'
+      });
+    },
+
+    // Error message
+    error: (message) => {
+      return Swal.fire({
+        title: 'Error!',
+        text: message,
+        icon: 'error',
+        confirmButtonText: 'OK',
+        confirmButtonColor: '#dc2626'
+      });
+    },
+
+    // Loading state
+    loading: (title = 'Processing...') => {
+      return Swal.fire({
+        title: title,
+        allowOutsideClick: false,
+        allowEscapeKey: false,
+        allowEnterKey: false,
+        showConfirmButton: false,
+        didOpen: () => {
+          Swal.showLoading();
+        }
+      });
+    }
+  };
+
+  // Fixed fetchVehicleData function
+  const fetchVehicleData = async (vehicleId) => {
+    if (!vehicleId || vehicleData[vehicleId]) return;
+    
+    try {
+      const vehicleDoc = await getDoc(doc(db, "vehicles", vehicleId));
+      if (vehicleDoc.exists()) {
+        setVehicleData(prev => ({
+          ...prev,
+          [vehicleId]: vehicleDoc.data()
+        }));
+      }
+    } catch (error) {
+      console.error("Error fetching vehicle data:", error);
+    }
+  };
+
+  // Added fetchUserData function
+  const fetchUserData = async (userId) => {
+    if (!userId || userData[userId]) return;
+    
+    try {
+      const userDoc = await getDoc(doc(db, "users", userId));
+      if (userDoc.exists()) {
+        setUserData(prev => ({
+          ...prev,
+          [userId]: userDoc.data()
+        }));
+      }
+    } catch (error) {
+      console.error("Error fetching user data:", error);
+    }
+  };
+
+  // Function to check for date conflicts between bookings
+  const checkDateConflicts = (bookings) => {
+    const conflicts = {};
+    const activeStatuses = ['Pending', 'Accepted', 'Active']; // Added Active status
+    
+    // Group bookings by vehicle ID
+    const bookingsByVehicle = bookings.reduce((acc, booking) => {
+      if (!activeStatuses.includes(booking.status)) return acc;
+      
+      const vehicleId = booking.vehicleId;
+      if (!acc[vehicleId]) acc[vehicleId] = [];
+      acc[vehicleId].push(booking);
+      return acc;
+    }, {});
+
+    // Check for conflicts within each vehicle's bookings
+    Object.keys(bookingsByVehicle).forEach(vehicleId => {
+      const vehicleBookings = bookingsByVehicle[vehicleId];
+      
+      for (let i = 0; i < vehicleBookings.length; i++) {
+        for (let j = i + 1; j < vehicleBookings.length; j++) {
+          const booking1 = vehicleBookings[i];
+          const booking2 = vehicleBookings[j];
+          
+          const dates1 = helpers.getBookingDates(booking1);
+          const dates2 = helpers.getBookingDates(booking2);
+          
+          if (datesOverlap(dates1.pickupDate, dates1.dropoffDate, dates2.pickupDate, dates2.dropoffDate)) {
+            // Mark both bookings as having conflicts
+            if (!conflicts[booking1.id]) conflicts[booking1.id] = [];
+            if (!conflicts[booking2.id]) conflicts[booking2.id] = [];
+            
+            conflicts[booking1.id].push({
+              conflictingBookingId: booking2.id,
+              conflictingClient: booking2.name,
+              conflictingDates: `${helpers.formatDate(dates2.pickupDate)} - ${helpers.formatDate(dates2.dropoffDate)}`
+            });
+            
+            conflicts[booking2.id].push({
+              conflictingBookingId: booking1.id,
+              conflictingClient: booking1.name,
+              conflictingDates: `${helpers.formatDate(dates1.pickupDate)} - ${helpers.formatDate(dates1.dropoffDate)}`
+            });
+          }
+        }
+      }
+    });
+
+    return conflicts;
+  };
+
+  // Helper function to check if two date ranges overlap
+  const datesOverlap = (start1, end1, start2, end2) => {
+    if (!start1 || !end1 || !start2 || !end2) return false;
+    
+    const startDate1 = new Date(start1);
+    const endDate1 = new Date(end1);
+    const startDate2 = new Date(start2);
+    const endDate2 = new Date(end2);
+    
+    // Check if dates overlap (including touching dates)
+    return startDate1 <= endDate2 && endDate1 >= startDate2;
+  };
+
+  // Function to parse booking date and time
+  const parseBookingDateTime = (dateString, timeString) => {
+    if (!dateString) return null;
+    
+    try {
+      const date = new Date(dateString);
+      
+      if (timeString) {
+        // Parse time string (supports formats like "2:30 PM", "14:30", "02:30", etc.)
+        const timeMatch = timeString.match(/(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i);
+        
+        if (timeMatch) {
+          let hours = parseInt(timeMatch[1]);
+          const minutes = parseInt(timeMatch[2]);
+          const ampm = timeMatch[3];
+          
+          // Convert to 24-hour format
+          if (ampm) {
+            if (ampm.toUpperCase() === 'PM' && hours !== 12) {
+              hours += 12;
+            } else if (ampm.toUpperCase() === 'AM' && hours === 12) {
+              hours = 0;
+            }
+          }
+          
+          date.setHours(hours, minutes, 0, 0);
+        } else {
+          // If time format is invalid, default to start of day
+          date.setHours(0, 0, 0, 0);
+        }
+      } else {
+        // If no time specified, assume start of day
+        date.setHours(0, 0, 0, 0);
+      }
+      
+      return date;
+    } catch (error) {
+      console.error("Error parsing booking datetime:", error);
+      return null;
+    }
+  };
+
+  // NEW: Function to check and activate accepted bookings when start time is reached
+  const checkAndActivateBookings = async (bookingsData) => {
+    const updatedBookings = [];
+    const now = new Date();
+    
+    for (const booking of bookingsData) {
+      if (booking.status === 'Accepted') {
+        const bookingDates = helpers.getBookingDates(booking);
+        const startDateTime = parseBookingDateTime(bookingDates.pickupDate, bookingDates.pickupTime);
+        
+        let shouldActivate = false;
+        
+        if (startDateTime) {
+          // Check if current time has passed the start time
+          shouldActivate = now >= startDateTime;
+          
+          console.log(`Checking booking ${booking.id} for activation:`);
+          console.log(`- Start DateTime: ${startDateTime.toLocaleString()}`);
+          console.log(`- Current Time: ${now.toLocaleString()}`);
+          console.log(`- Should Activate: ${shouldActivate}`);
+        }
+        
+        if (shouldActivate) {
+          try {
+            // Activate the booking
+            const bookingRef = doc(db, "bookings", booking.id);
+            await updateDoc(bookingRef, {
+              status: "Active",
+              activatedAt: Timestamp.now(),
+              updatedAt: Timestamp.now()
+            });
+            
+            // Update the booking object
+            const updatedBooking = {
+              ...booking,
+              status: "Active",
+              activatedAt: Timestamp.now()
+            };
+            
+            updatedBookings.push(updatedBooking);
+            
+            // Show notification for activated booking
+            setTimeout(() => {
+              showSweetAlert.bookingActivated(updatedBooking);
+            }, 1000);
+            
+            console.log(`Activated booking ${booking.id} - start time reached`);
+            
+          } catch (error) {
+            console.error("Error activating booking:", error);
+            // If update fails, keep original booking
+            updatedBookings.push(booking);
+          }
+        } else {
+          // Booking is not ready to activate, keep as is
+          updatedBookings.push(booking);
+        }
+      } else {
+        // Booking is not accepted, keep as is
+        updatedBookings.push(booking);
+      }
+    }
+    
+    return updatedBookings;
+  };
+
+  // Function to check and auto-cancel expired pending bookings
+  const checkAndCancelExpiredBookings = async (bookingsData) => {
+    const updatedBookings = [];
+    const now = new Date();
+    
+    for (const booking of bookingsData) {
+      if (booking.status === 'Pending') {
+        const bookingDates = helpers.getBookingDates(booking);
+        const bookingDateTime = parseBookingDateTime(bookingDates.pickupDate, bookingDates.pickupTime);
+        
+        let shouldCancel = false;
+        
+        if (bookingDateTime) {
+          // Add a grace period (30 minutes) to avoid cancelling too early
+          const gracePeriodMs = 30 * 60 * 1000; // 30 minutes
+          const cutoffTime = new Date(bookingDateTime.getTime() + gracePeriodMs);
+          
+          shouldCancel = now > cutoffTime;
+          
+          console.log(`Checking booking ${booking.id}:`);
+          console.log(`- Booking DateTime: ${bookingDateTime.toLocaleString()}`);
+          console.log(`- Current Time: ${now.toLocaleString()}`);
+          console.log(`- Cutoff Time (with grace): ${cutoffTime.toLocaleString()}`);
+          console.log(`- Should Cancel: ${shouldCancel}`);
+        }
+        
+        if (shouldCancel) {
+          try {
+            // Auto-cancel the booking
+            const bookingRef = doc(db, "bookings", booking.id);
+            await updateDoc(bookingRef, {
+              status: "Cancelled",
+              autoCancelled: true,
+              autoCancelledAt: Timestamp.now(),
+              autoCancelReason: "Booking start date and time has passed",
+              updatedAt: Timestamp.now()
+            });
+            
+            // Update the booking object
+            const updatedBooking = {
+              ...booking,
+              status: "Cancelled",
+              autoCancelled: true,
+              autoCancelledAt: Timestamp.now(),
+              autoCancelReason: "Booking start date and time has passed"
+            };
+            
+            updatedBookings.push(updatedBooking);
+            
+            // Show notification for auto-cancelled booking
+            setTimeout(() => {
+              showSweetAlert.autoCancelNotification(updatedBooking);
+            }, 1000);
+            
+            console.log(`Auto-cancelled booking ${booking.id} - datetime passed`);
+            
+          } catch (error) {
+            console.error("Error auto-cancelling expired booking:", error);
+            // If update fails, keep original booking
+            updatedBookings.push(booking);
+          }
+        } else {
+          // Booking is not expired, keep as is
+          updatedBookings.push(booking);
+        }
+      } else {
+        // Booking is not pending, keep as is
+        updatedBookings.push(booking);
+      }
+    }
+    
+    return updatedBookings;
+  };
+
+  // UPDATED Status configuration - Added Active status
+  const statusConfig = {
+    Pending: { bgColor: "bg-amber-50", textColor: "text-amber-700", dotColor: "bg-amber-400" },
+    Accepted: { bgColor: "bg-blue-50", textColor: "text-blue-700", dotColor: "bg-blue-500" },
+    Active: { bgColor: "bg-green-50", textColor: "text-green-700", dotColor: "bg-green-500" },
+    Cancelled: { bgColor: "bg-gray-50", textColor: "text-gray-700", dotColor: "bg-gray-500" },
+    Completed: { bgColor: "bg-emerald-50", textColor: "text-emerald-700", dotColor: "bg-emerald-500" },
+    Overdue: { bgColor: "bg-red-50", textColor: "text-red-700", dotColor: "bg-red-500" }
+  };
+
+  // UPDATED Action buttons configuration - Added Active status handling
+  const actionButtons = [
+    {
+      action: "update_deposit",
+      enabledWhen: ["Pending", "Accepted", "Active"],
+      icon: <Wallet className="w-4 h-4" />,
+      label: "Deposit",
+      style: "bg-purple-50 text-purple-600 hover:bg-purple-100"
+    },
+    {
+      action: "Accepted",
+      enabledWhen: "Pending",
+      icon: <CheckCircle2 className="w-4 h-4" />,
+      label: "Accept",
+      style: "bg-blue-50 text-blue-600 hover:bg-blue-100"
+    },
+    {
+      action: "Cancelled",
+      enabledWhen: "Pending",
+      icon: <XCircle className="w-4 h-4" />,
+      label: "Cancel",
+      style: "bg-gray-50 text-gray-600 hover:bg-gray-100"
+    },
+    {
+      action: "Completed",
+      enabledWhen: ["Active", "Overdue"],
+      icon: <CheckCircle2 className="w-4 h-4" />,
+      label: "Complete",
+      style: "bg-green-50 text-green-600 hover:bg-green-100"
+    },
+    {
+      action: "message",
+      alwaysEnabled: true,
+      icon: <MessageSquare className="w-4 h-4" />,
+      label: "Message",
+      style: "bg-blue-50 text-blue-600 hover:bg-blue-100"
+    },
+    {
+      action: "details",
+      alwaysEnabled: true,
+      icon: <FileText className="w-4 h-4" />,
+      label: "Details",
+      style: "bg-purple-50 text-purple-600 hover:bg-purple-100"
+    }
+  ];
+
+  // Function to update deposit status
+  const updateDepositStatus = async (bookingId, status, amount = null) => {
+    try {
+      showSweetAlert.loading('Updating deposit status...');
+      
+      const bookingRef = doc(db, "bookings", bookingId);
+      const updateData = {
+        depositStatus: status,
+        updatedAt: Timestamp.now()
+      };
+      
+      if (amount !== null) {
+        updateData.depositAmount = amount;
+      }
+      
+      await updateDoc(bookingRef, updateData);
+      
+      Swal.close();
+      showSweetAlert.success('deposit_updated', { name: 'Deposit status' });
+      
+      // Update selected booking if modal is open
+      if (selectedBooking && selectedBooking.id === bookingId) {
+        setSelectedBooking(prev => ({
+          ...prev,
+          depositStatus: status,
+          depositAmount: amount
+        }));
+      }
+    } catch (error) {
+      console.error("Error updating deposit status:", error);
+      Swal.close();
+      showSweetAlert.error('Failed to update deposit status. Please try again.');
+    }
+  };
+
+  // Combined helper functions
+  const helpers = {
+    logout: async () => {
+      try {
+        await auth.signOut();
+        navigate("/login");
+      } catch (error) {
+        console.error("Logout failed:", error);
+      }
+    },
+    
+    formatDate: (dateString) => {
+      if (!dateString) return "N/A";
+      try {
+        const date = new Date(dateString);
+        return date.toLocaleDateString('en-US', {
+          year: 'numeric', month: 'short', day: 'numeric'
+        });
+      } catch (error) {
+        console.error("Error formatting date:", error);
+        return "Invalid Date";
+      }
+    },
+    
+    formatTime: (dateString) => {
+      if (!dateString) return "N/A";
+      try {
+        const date = new Date(dateString);
+        return date.toLocaleTimeString('en-US', {
+          hour: '2-digit', minute: '2-digit'
+        });
+      } catch (error) {
+        console.error("Error formatting time:", error);
+        return "Invalid Time";
+      }
+    },
+    
+    formatDateTime: (dateInput) => {
+      if (!dateInput) return null;
+      try {
+        let date;
+        
+        // Handle Firestore Timestamp objects
+        if (dateInput && typeof dateInput.toDate === 'function') {
+          date = dateInput.toDate();
+        }
+        // Handle regular Date objects or date strings
+        else {
+          date = new Date(dateInput);
+        }
+        
+        // Check if the date is valid
+        if (isNaN(date.getTime())) {
+          return null;
+        }
+        
+        return date.toLocaleDateString('en-US', {
+          year: 'numeric', month: 'short', day: 'numeric',
+          hour: '2-digit', minute: '2-digit'
+        });
+      } catch (error) {
+        console.error("Error formatting date and time:", error);
+        return null;
+      }
+    },
+    
+    parseBookingDateTime: parseBookingDateTime, // Expose the function
+    
+    sortBookings: (bookingsArray) => {
+      return [...bookingsArray].sort((a, b) => {
+        const getTime = (booking) => {
+          if (booking.timestamp) {
+            return new Date(booking.timestamp).getTime();
+          } else if (booking.createdAt) {
+            return booking.createdAt instanceof Timestamp ? 
+                   booking.createdAt.toMillis() : 
+                   new Date(booking.createdAt).getTime();
+          }
+          return 0;
+        };
+        return getTime(b) - getTime(a); // Newest first
+      });
+    },
+    
+    getStatusTag: (status, hasConflict = false, booking = null) => {
+      const formattedStatus = status ? 
+        status.charAt(0).toUpperCase() + status.slice(1).toLowerCase() : 
+        'Pending';
+  
+      const config = statusConfig[formattedStatus] || statusConfig.Pending;
+      
+      // Add special styling for Active status
+      const activeStyle = formattedStatus === 'Active' ? 
+        'ring-2 ring-green-200 animate-pulse' : '';
+      
+      return (
+        <div className="flex items-center gap-2">
+          <span className={`${config.bgColor} ${config.textColor} px-2.5 py-0.5 rounded-full text-xs font-medium flex items-center gap-1 ${activeStyle}`}>
+            <span className={`w-2 h-2 rounded-full ${config.dotColor}`}></span>
+            {formattedStatus === 'Active' && <Play className="w-3 h-3" />}
+            {formattedStatus}
+            {booking?.autoCancelled && (
+              <span className="ml-1 text-xs opacity-75">(Auto)</span>
+            )}
+          </span>
+          {hasConflict && (
+            <span className="bg-red-100 text-red-700 px-2 py-0.5 rounded-full text-xs font-medium flex items-center gap-1">
+              <AlertTriangle className="w-3 h-3" />
+              Conflict
+            </span>
+          )}
+        </div>
+      );
+    },
+
+    getBookingDates: (booking) => {
+      return {
+        pickupDate: booking.startDate || booking.pickupDate,
+        pickupTime: booking.pickupTime,
+        pickupLocation: booking.pickupLocation,
+        dropoffDate: booking.endDate || booking.dropoffDate,
+        dropoffTime: booking.dropoffTime,
+        dropoffLocation: booking.dropoffLocation
+      };
+    },
+
+    renderInfoField: (label, value, icon = null) => (
+      <div>
+        <p className="text-sm text-gray-500">{label}</p>
+        <p className="font-medium flex items-center gap-1.5">
+          {icon && icon}
+          {value || "Not provided"}
+        </p>
+      </div>
+    ),
+
+    renderSection: (title, content) => (
+      <div className="border-t border-gray-100 pt-4 mb-4">
+        <h4 className="font-medium mb-3">{title}</h4>
+        {content}
+      </div>
+    ),
+
+    getDateFromString: (dateString) => {
+      if (!dateString) return null;
+      try {
+        return new Date(dateString);
+      } catch (error) {
+        console.error("Error converting date string:", error);
+        return null;
+      }
+    },
+
+    isDateInRange: (dateString, startDate, endDate) => {
+      if (!dateString) return false;
+      
+      const checkDate = new Date(dateString);
+      checkDate.setHours(0, 0, 0, 0);
+      
+      if (startDate) {
+        const start = new Date(startDate);
+        start.setHours(0, 0, 0, 0);
+        if (checkDate < start) return false;
+      }
+      
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        if (checkDate > end) return false;
+      }
+      
+      return true;
+    },
+
+    // UPDATED: Overdue detection now applies to Active bookings with 1-hour grace period
+    isBookingOverdue: (booking) => {
+      // If booking already has overdueHours field from Firestore, use it
+      if (booking.overdueHours !== undefined) {
+        return booking.overdueHours > 1; // 1 hour grace period
+      }
+      
+      const bookingDates = helpers.getBookingDates(booking);
+      const dropoffDate = helpers.getDateFromString(bookingDates.dropoffDate);
+      
+      if (!dropoffDate) return false;
+      
+      const now = new Date();
+      const overdueMs = now - dropoffDate;
+      const overdueHours = overdueMs / (1000 * 60 * 60);
+
+      return (
+        booking.status === 'Active' && // Only Active bookings can become overdue
+        overdueHours > 1  // 1-hour grace period
+      );
+    },
+
+    // Calculate overdue amount using Firestore fields
+    calculateOverdueAmount: (booking) => {
+      // If booking has overdueCharge field from Firestore, use it directly
+      if (booking.overdueCharge !== undefined) {
+        return booking.overdueCharge;
+      }
+      
+      // Fallback calculation if no overdueCharge field
+      if (booking.status !== 'Overdue' || !booking.hourlyRate) return 0;
+      
+      const bookingDates = helpers.getBookingDates(booking);
+      const dropoffDate = helpers.getDateFromString(bookingDates.dropoffDate);
+      const now = new Date();
+      
+      if (!dropoffDate) return 0;
+      
+      const overdueMs = now - dropoffDate;
+      const overdueHours = Math.ceil(overdueMs / (1000 * 60 * 60));
+      
+      // Apply grace period - only charge after 1 hour
+      const chargeableHours = Math.max(0, overdueHours - 1);
+      return chargeableHours * booking.hourlyRate;
+    },
+
+    // UPDATED: Function to calculate and update overdue fields in Firestore for Active bookings
+    updateOverdueFields: async (booking) => {
+      const bookingDates = helpers.getBookingDates(booking);
+      const dropoffDate = helpers.getDateFromString(bookingDates.dropoffDate);
+      
+      if (!dropoffDate) return booking;
+      
+      const now = new Date();
+      const overdueMs = now - dropoffDate;
+      const overdueHours = Math.max(0, Math.ceil(overdueMs / (1000 * 60 * 60)));
+      
+      // Calculate overdue charge with grace period
+      const chargeableHours = Math.max(0, overdueHours - 1); // 1 hour grace period
+      const overdueCharge = booking.hourlyRate ? chargeableHours * booking.hourlyRate : 0;
+      
+      // Update Firestore document with calculated values - only for Active bookings
+      if (overdueHours > 1 && booking.status === 'Active') {
+        try {
+          const bookingRef = doc(db, "bookings", booking.id);
+          await updateDoc(bookingRef, {
+            status: "Overdue",
+            overdueHours: overdueHours,
+            overdueCharge: overdueCharge,
+            updatedAt: Timestamp.now()
+          });
+          
+          return {
+            ...booking,
+            status: "Overdue",
+            overdueHours: overdueHours,
+            overdueCharge: overdueCharge
+          };
+        } catch (error) {
+          console.error("Error updating overdue fields:", error);
+        }
+      }
+      
+      return booking;
+    },
+
+    // Deposit status badge helper
+    getDepositBadge: (depositStatus) => {
+      if (!depositStatus) return null;
+      
+      const config = depositStatusConfig[depositStatus];
+      if (!config) return null;
+      
+      return (
+        <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${config.bgColor} ${config.color}`}>
+          {config.icon}
+          {config.label}
+        </span>
+      );
+    },
+
+    // Calculate remaining balance after deposit
+    calculateRemainingBalance: (booking) => {
+      const basePrice = booking.dailyPrice || booking.rentalAmount || 0;
+      const depositAmount = booking.depositAmount || 0;
+      return basePrice - depositAmount;
+    }
+  };
+
+  // Date filter functions
+  const dateFilterFunctions = {
+    applyDateFilter: () => {
+      if (dateFilter.startDate && dateFilter.endDate) {
+        setActiveDateFilter({
+          type: 'range',
+          startDate: dateFilter.startDate,
+          endDate: dateFilter.endDate,
+          display: `${dateFilter.startDate} to ${dateFilter.endDate}`
+        });
+      }
+      setShowDateFilter(false);
+    },
+
+    clearDateFilter: () => {
+      setActiveDateFilter(null);
+      setDateFilter({
+        startDate: "",
+        endDate: ""
+      });
+    }
+  };
+
+  // UPDATED Enhanced booking actions - AUTOMATIC EMAILS ONLY with Active status support
+  const actions = {
+    updateStatus: async (id, newStatus, booking) => {
+      try {
+        const bookingRef = doc(db, "bookings", id);
+        const bookingSnap = await getDoc(bookingRef);
+        
+        if (!bookingSnap.exists()) {
+          throw new Error("Booking not found");
+        }
+
+        const bookingData = bookingSnap.data();
+        const formattedStatus = newStatus.charAt(0).toUpperCase() + newStatus.slice(1).toLowerCase();
+        const hasConflict = conflictingBookings[id];
+        const isOverdue = booking.status === 'Overdue';
+        
+        let confirmResult;
+        
+        // Show different confirmation dialogs based on action
+        switch (formattedStatus) {
+          case 'Accepted':
+            confirmResult = await showSweetAlert.acceptBooking(booking, hasConflict);
+            break;
+          case 'Cancelled':
+            confirmResult = await showSweetAlert.cancelBooking(booking);
+            break;
+          case 'Completed':
+            confirmResult = await showSweetAlert.completeBooking(booking, isOverdue);
+            break;
+          default:
+            confirmResult = { isConfirmed: true };
+        }
+
+        if (confirmResult.isConfirmed) {
+          // Show loading state
+          showSweetAlert.loading('Updating booking status...');
+          
+          // Update booking status in Firestore (this triggers the Cloud Function automatically)
+          await updateDoc(bookingRef, {
+            status: formattedStatus, 
+            updatedAt: Timestamp.now()
+          });
+          
+          Swal.close();
+          
+          // Show success message
+          const actionMap = {
+            'Accepted': 'accepted',
+            'Cancelled': 'cancelled', 
+            'Completed': 'completed'
+          };
+          
+          showSweetAlert.success(actionMap[formattedStatus], booking);
+          
+          // AUTOMATIC EMAIL NOTIFICATION: Show confirmation that email was sent automatically
+          if (['Accepted', 'Completed'].includes(formattedStatus)) {
+            setTimeout(() => {
+              Swal.fire({
+                title: '📧 Email Sent Automatically!',
+                text: `The client has been notified about their ${formattedStatus.toLowerCase()} booking via email.`,
+                icon: 'success',
+                timer: 4000,
+                timerProgressBar: true,
+                toast: true,
+                position: 'top-end',
+                showConfirmButton: false
+              });
+            }, 1500);
+          }
+          
+          // Update selected booking if modal is open
+          if (selectedBooking && selectedBooking.id === id) {
+            setSelectedBooking(prev => ({
+              ...prev,
+              status: formattedStatus
+            }));
+          }
+        }
+      } catch (error) {
+        console.error("Error updating booking status:", error);
+        Swal.close();
+        showSweetAlert.error('Failed to update booking status. Please try again.');
+      }
+    },
+    
+    // Deposit action
+    updateDeposit: async (booking) => {
+      const result = await showSweetAlert.updateDepositStatus(booking);
+      
+      if (result.isConfirmed) {
+        const { status, amount } = result.value;
+        await updateDepositStatus(booking.id, status, amount);
+      }
+    },
+    
+    viewDetails: (booking) => {
+      setSelectedBooking(booking);
+      setShowDetailModal(true);
+
+      if (booking.vehicleId) {
+        fetchVehicleData(booking.vehicleId);
+      }
+
+      if (booking.userId) {
+        fetchUserData(booking.userId);
+      }
+
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      document.body.style.overflow = 'hidden';
+    },
+    
+    closeDetails: () => {
+      setShowDetailModal(false);
+      setSelectedBooking(null);
+      document.body.style.overflow = 'auto';
+    },
+    
+    message: (booking) => navigate('/messages', { 
+      state: { 
+        clientId: booking.userId,  
+        clientName: booking.name,
+        clientEmail: booking.email,
+        bookingId: booking.id
+      }
+    }),
+  };
+
+  // UPDATED: Function to check and update overdue bookings for Active status only
+  const checkAndUpdateOverdueBookings = async (bookingsData) => {
+    const updatedBookings = [];
+    
+    for (const booking of bookingsData) {
+      if (helpers.isBookingOverdue(booking) && 
+          booking.status === 'Active') { // Only Active bookings can become overdue
+        
+        const updatedBooking = await helpers.updateOverdueFields(booking);
+        updatedBookings.push(updatedBooking);
+        
+        // Show overdue notification only if status actually changed
+        if (updatedBooking.status === 'Overdue' && booking.status !== 'Overdue') {
+          setTimeout(() => {
+            showSweetAlert.bookingOverdue(updatedBooking);
+          }, 1000);
+        }
+      } else {
+        updatedBookings.push(booking);
+      }
+    }
+    
+    return updatedBookings;
+  };
+
+  // UPDATED Fetch bookings with real-time updates, activation, and conflict checking
+  useEffect(() => {
+    const fetchBookings = async () => {
+      try {
+        const currentUser = auth.currentUser;
+        if (!currentUser) {
+          console.error("No user logged in");
+          navigate("/login");
+          return;
+        }
+        
+        const bookingsRef = collection(db, "bookings");
+        const q = query(bookingsRef, where("ownerId", "==", currentUser.uid));
+        
+        const unsubscribe = onSnapshot(q, async (snapshot) => {
+          let bookingsData = snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+          }));
+          
+          // FIRST: Check and auto-cancel expired pending bookings
+          bookingsData = await checkAndCancelExpiredBookings(bookingsData);
+          
+          // SECOND: Check and activate accepted bookings when start time is reached
+          bookingsData = await checkAndActivateBookings(bookingsData);
+          
+          // THIRD: Check for overdue bookings (Active -> Overdue) and update if needed
+          bookingsData = await checkAndUpdateOverdueBookings(bookingsData);
+          bookingsData = helpers.sortBookings(bookingsData);
+          
+          // Check for date conflicts
+          const conflicts = checkDateConflicts(bookingsData);
+          setConflictingBookings(conflicts);
+          
+          // Show conflict warning if there are any conflicts
+          const hasAnyConflicts = Object.keys(conflicts).length > 0;
+          if (hasAnyConflicts && !showConflictWarning) {
+            setShowConflictWarning(true);
+          }
+          
+          setBookings(bookingsData);
+        }, (error) => {
+          console.error("Error fetching bookings:", error);
+        });
+        
+        return () => unsubscribe();
+      } catch (error) {
+        console.error("Error fetching bookings:", error);
+      }
+    };
+
+    fetchBookings();
+  }, [navigate, showConflictWarning]);
+
+  // Updated useEffect to fetch both vehicle and user data
+  useEffect(() => {
+    // Fetch vehicle and user data for all bookings
+    bookings.forEach(booking => {
+      if (booking.vehicleId && !vehicleData[booking.vehicleId]) {
+        fetchVehicleData(booking.vehicleId);
+      }
+      if (booking.userId && !userData[booking.userId]) {
+        fetchUserData(booking.userId);
+      }
+    });
+  }, [bookings, vehicleData, userData]);
+
+  // UPDATED Filter bookings with Active status support
+  const filteredBookings = bookings.filter(booking => {
+    const statusMatch = activeFilter === "all" || 
+                       booking.status.toLowerCase() === activeFilter;
+    
+    let dateMatch = true;
+    if (activeDateFilter) {
+      const bookingDates = helpers.getBookingDates(booking);
+      const startDate = bookingDates.pickupDate;
+      const createdDate = booking.timestamp || booking.createdAt;
+      const datesToCheck = [startDate, createdDate].filter(Boolean);
+      
+      if (activeDateFilter.type === 'range') {
+        dateMatch = datesToCheck.some(date => 
+          helpers.isDateInRange(date, activeDateFilter.startDate, activeDateFilter.endDate)
+        );
+      }
+    }
+    
+    return statusMatch && dateMatch;
+  });
+
+  // Render date/time info for bookings
+  const renderDateTimeInfo = (label, date, time, location, icon) => (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2 text-gray-500">
+        {icon}
+        <span>{label}</span>
+      </div>
+      <p className="font-medium ml-6">{helpers.formatDate(date)}</p>
+      {time && <p className="text-gray-600 ml-6">
+        <Clock className="w-3 h-3 inline mr-1" />
+        {helpers.formatTime(time)}
+      </p>}
+      <p className="text-gray-500 ml-6">{location || "Not specified"}</p>
+    </div>
+  );
+
+  return (
+    <div className="flex h-screen">
+      {/* Sidebar */}
+      <SidebarOwner onLogout={helpers.logout} />
+
+      {/* Main Content */}
+      <div className="flex-1 overflow-y-auto">
+        <div className="sticky top-0 z-20 bg-white shadow">
+          <TopbarOwner onLogout={helpers.logout} />
+        </div>
+
+        <div className="p-6">
+          {/* Conflict Warning Banner */}
+          {Object.keys(conflictingBookings).length > 0 && (
+            <div className="mb-6 p-4 bg-red-50 border-l-4 border-red-400 rounded-r-lg">
+              <div className="flex items-center">
+                <AlertTriangle className="h-5 w-5 text-red-400 mr-2" />
+                <div>
+                  <h3 className="text-sm font-medium text-red-800">
+                    Date Conflicts Detected
+                  </h3>
+                  <p className="text-sm text-red-700 mt-1">
+                    {Object.keys(conflictingBookings).length} booking(s) have overlapping dates. 
+                    Review conflicting bookings carefully before accepting.
+                  </p>
+                </div>
+                <button 
+                  onClick={() => setShowConflictWarning(false)}
+                  className="ml-auto text-red-400 hover:text-red-600"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Header Section */}
+          <div className="mb-8">
+            <h1 className="text-3xl font-semibold text-gray-900">Booking Management</h1>
+
+            {/* UPDATED Filter Controls - Added Active status */}
+            <div className="flex items-center justify-between mt-6">
+              {/* Status Filter Tabs */}
+              <div className="flex space-x-2 border-b border-gray-200">
+                {["all", "pending", "accepted", "active", "overdue", "cancelled", "completed"].map((filter) => (
+                  <button
+                    key={filter}
+                    onClick={() => setActiveFilter(filter)}
+                    className={`px-4 py-2 text-sm font-medium relative ${
+                      activeFilter === filter
+                        ? "text-blue-600"
+                        : "text-gray-500 hover:text-gray-700"
+                    }`}
+                  >
+                    {filter.charAt(0).toUpperCase() + filter.slice(1)}
+                    {filter === "active" && (
+                      <Play className="w-3 h-3 inline ml-1" />
+                    )}
+                    {activeFilter === filter && (
+                      <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-600"></span>
+                    )}
+                  </button>
+                ))}
+              </div>
+
+              {/* Date Filter Button */}
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowDateFilter(!showDateFilter)}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    activeDateFilter 
+                      ? "bg-blue-100 text-blue-700 border border-blue-200" 
+                      : "bg-white text-gray-600 border border-gray-200 hover:bg-gray-50"
+                  }`}
+                >
+                  <CalendarDays className="w-4 h-4" />
+                  Date Filter
+                  {activeDateFilter && <span className="text-xs">({activeDateFilter.display})</span>}
+                </button>
+
+                {activeDateFilter && (
+                  <button
+                    onClick={dateFilterFunctions.clearDateFilter}
+                    className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+                    title="Clear date filter"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Date Filter Panel */}
+            {showDateFilter && (
+              <div className="mt-4 p-4 bg-white border border-gray-200 rounded-lg shadow-sm">
+                <div>
+                  <h4 className="font-medium text-gray-900 mb-3">Filter by Date Range</h4>
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-sm text-gray-600 mb-1">Start Date</label>
+                      <input
+                        type="date"
+                        value={dateFilter.startDate}
+                        onChange={(e) => setDateFilter(prev => ({ ...prev, startDate: e.target.value }))}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm text-gray-600 mb-1">End Date</label>
+                      <input
+                        type="date"
+                        value={dateFilter.endDate}
+                        onChange={(e) => setDateFilter(prev => ({ ...prev, endDate: e.target.value }))}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 mt-4 pt-4 border-t border-gray-200">
+                  <button
+                    onClick={dateFilterFunctions.applyDateFilter}
+                    className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
+                  >
+                    Apply Filter
+                  </button>
+                  <button
+                    onClick={() => setShowDateFilter(false)}
+                    className="px-4 py-2 text-gray-600 hover:text-gray-800 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Results Summary */}
+          {activeDateFilter && (
+            <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+              <p className="text-sm text-blue-800">
+                <Filter className="w-4 h-4 inline mr-1" />
+                Showing {filteredBookings.length} booking{filteredBookings.length !== 1 ? 's' : ''} 
+                {` from ${activeDateFilter.display}`}
+                {activeFilter !== 'all' && ` with status: ${activeFilter}`}
+              </p>
+            </div>
+          )}
+
+          {/* Booking Cards */}
+          {filteredBookings.length > 0 ? (
+            <div className="space-y-4">
+              {filteredBookings.map((booking) => {
+                const bookingDates = helpers.getBookingDates(booking);
+                const basePrice = booking.dailyPrice || booking.rentalAmount || 0;
+                const depositAmount = booking.depositAmount || 0;
+                const remainingBalance = helpers.calculateRemainingBalance(booking);
+                const overdueAmount = helpers.calculateOverdueAmount(booking);
+                const hasConflict = conflictingBookings[booking.id];
+                
+                return (
+                  <div
+                    key={booking.id}
+                    className={`bg-white border rounded-lg p-5 shadow-md hover:shadow-lg transition-all ${
+                      hasConflict ? 'border-red-300 bg-red-50' : 
+                      booking.status === 'Active' ? 'border-green-300 bg-green-50' : 
+                      'border-gray-200'
+                    }`}
+                  >
+                    {/* Conflict Warning */}
+                    {hasConflict && (
+                      <div className="mb-4 p-3 bg-red-100 border border-red-300 rounded-lg">
+                        <div className="flex items-start gap-2">
+                          <AlertTriangle className="h-4 w-4 text-red-600 mt-0.5 flex-shrink-0" />
+                          <div className="text-sm">
+                            <p className="font-medium text-red-800">Date Conflict Detected</p>
+                            <p className="text-red-700 mt-1">
+                              This booking overlaps with:
+                            </p>
+                            <ul className="mt-2 space-y-1">
+                              {hasConflict.map((conflict, index) => (
+                                <li key={index} className="text-red-700 text-xs">
+                                  • {conflict.conflictingClient} ({conflict.conflictingDates})
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex justify-between items-start">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 mb-2">
+                          <h3 className="font-medium text-gray-900">
+                            {userData[booking.userId]?.fullName || booking.name || "Unknown User"}
+                          </h3>
+                          <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded">
+                            Transaction ID: {booking.transactionId || booking.id}
+                          </span>
+                          {helpers.getDepositBadge(booking.depositStatus)}
+                          {booking.status === 'Active' && (
+                            <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded-full text-xs font-medium flex items-center gap-1">
+                              <Play className="w-3 h-3" />
+                              In Progress
+                            </span>
+                          )}
+                        </div>
+                        
+                        {/* Deposit amount display */}
+                        {booking.depositAmount && (
+                          <p className="text-sm text-gray-500 mb-2 flex items-center gap-1.5">
+                            <CreditCard className="w-4 h-4 text-gray-400" />
+                            Deposit: ₱{booking.depositAmount}
+                          </p>
+                        )}
+                        
+                        <p className="text-sm text-gray-500 mb-1 flex items-center gap-1.5">
+                          <Mail className="w-4 h-4 text-gray-400" />
+                          {userData[booking.userId]?.email || booking.email || "No email provided"}
+                        </p>
+                        
+                        <p className="text-sm text-gray-500 mb-1 flex items-center gap-1.5">
+                          <MapPin className="w-4 h-4 text-gray-400" />
+                          {userData[booking.userId]?.address || booking.address || "No address provided"}
+                        </p>
+                        
+                        <p className="text-sm text-gray-500 mb-1 flex items-center gap-1.5">
+                          <Car className="w-4 h-4 text-gray-400" />
+                          {booking.vehicleBrand || ""} {booking.vehicleModel || "Vehicle"} 
+                          {booking.vehicleYear ? `(${booking.vehicleYear})` : ""}
+                          {vehicleData[booking.vehicleId]?.carNumber && ` - ${vehicleData[booking.vehicleId].carNumber}`}
+                          {booking.fuelType && ` - ${booking.fuelType}`}
+                        </p>
+                        
+                        {/* UPDATED: Price display with deposit deduction */}
+                        <div className="text-sm text-gray-500 mb-1 flex flex-col gap-1">
+                          <p className="flex items-center gap-1.5">
+                            <DollarSign className="w-4 h-4 text-gray-400" />
+                            Base Price: ₱{basePrice}
+                          </p>
+                          {depositAmount > 0 && booking.depositStatus === 'paid' && (
+                            <>
+                              <p className="flex items-center gap-1.5 text-green-600 ml-6">
+                                Deposit Paid: -₱{depositAmount}
+                              </p>
+                              <p className="flex items-center gap-1.5 font-medium text-blue-600 ml-6">
+                                Remaining Balance: ₱{remainingBalance}
+                              </p>
+                            </>
+                          )}
+                          {booking.status === "Overdue" && booking.hourlyRate && (
+                            <>
+                              <p className="flex items-center gap-1.5 text-gray-500 ml-6">
+                                Hourly Rate: ₱{booking.hourlyRate}/hr
+                              </p>
+                              <p className="flex items-center gap-1.5 text-red-600 ml-6">
+                                Overdue Charges: +₱{overdueAmount}
+                              </p>
+                              <p className="flex items-center gap-1.5 font-bold text-red-700 ml-6">
+                                Total Amount: ₱{remainingBalance + overdueAmount}
+                              </p>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      {helpers.getStatusTag(booking.status, hasConflict, booking)}
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                      {renderDateTimeInfo(
+                        "Pickup / Start Date", 
+                        bookingDates.pickupDate,
+                        bookingDates.pickupTime,
+                        bookingDates.pickupLocation,
+                        <Calendar className="w-4 h-4" />
+                      )}
+                      {renderDateTimeInfo(
+                        "Return / End Date", 
+                        bookingDates.dropoffDate,
+                        bookingDates.dropoffTime,
+                        bookingDates.dropoffLocation,
+                        <Calendar className="w-4 h-4" />
+                      )}
+                    </div>
+
+                    {/* UPDATED Button rendering for Active status */}
+                    <div className="mt-6 flex flex-wrap gap-2">
+                      {actionButtons.map((btn, index) => {
+                        const isEnabled = btn.alwaysEnabled || 
+                          (Array.isArray(btn.enabledWhen) 
+                            ? btn.enabledWhen.includes(booking.status)
+                            : booking.status === btn.enabledWhen);
+                        
+                        if (btn.action === "message" || btn.action === "details") {
+                          const clickHandler = btn.action === "message" 
+                            ? () => actions.message(booking)
+                            : () => actions.viewDetails(booking);
+                          
+                          return (
+                            <button 
+                              key={index}
+                              onClick={clickHandler}
+                              className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg text-sm ${btn.style}`}
+                            >
+                              {btn.icon}
+                              <span>{btn.label}</span>
+                            </button>
+                          );
+                        }
+
+                        if (btn.action === "update_deposit") {
+                          return (
+                            <button
+                              key={index}
+                              onClick={() => actions.updateDeposit(booking)}
+                              disabled={!isEnabled}
+                              className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg text-sm ${
+                                isEnabled ? btn.style : "bg-gray-100 text-gray-400 cursor-not-allowed"
+                              }`}
+                            >
+                              {btn.icon}
+                              <span>{btn.label}</span>
+                            </button>
+                          );
+                        }
+                        
+                        // Regular status change buttons (emails sent automatically)
+                        return (
+                          <button
+                            key={index}
+                            onClick={() => actions.updateStatus(booking.id, btn.action, booking)}
+                            disabled={!isEnabled}
+                            className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg text-sm ${
+                              isEnabled ? btn.style : "bg-gray-100 text-gray-400 cursor-not-allowed"
+                            } ${hasConflict && btn.action === "Accepted" ? "ring-2 ring-red-300" : ""}`}
+                          >
+                            {btn.icon}
+                            <span>{btn.label}</span>
+                            {hasConflict && btn.action === "Accepted" && (
+                              <AlertTriangle className="w-3 h-3 text-red-500" />
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="text-center py-16 bg-white rounded-lg border border-gray-200">
+              <div className="mx-auto w-16 h-16 bg-gray-50 rounded-full flex items-center justify-center mb-4">
+                <Car className="w-6 h-6 text-gray-400" />
+              </div>
+              <h3 className="text-lg font-medium text-gray-900">No bookings found</h3>
+              <p className="mt-1 text-gray-500">
+                {activeDateFilter 
+                  ? `No ${activeFilter === "all" ? "" : activeFilter} bookings found for the selected date range.`
+                  : `There are currently no ${activeFilter === "all" ? "" : activeFilter} bookings.`
+                }
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* UPDATED Enhanced Detailed Booking Modal with Active status support and remaining balance */}
+      {showDetailModal && selectedBooking && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-start justify-center z-50 p-4 md:p-0 overflow-y-auto">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-3xl my-16 relative">
+            {/* Modal Header */}
+            <div className="sticky top-0 z-10 bg-white border-b border-gray-200 px-6 py-4 flex justify-between items-center rounded-t-lg">
+              <div className="flex items-center gap-3">
+                <h3 className="text-lg font-medium text-gray-900">Booking Details</h3>
+                {selectedBooking.status === 'Active' && (
+                  <span className="bg-green-100 text-green-700 px-2 py-1 rounded-full text-xs font-medium flex items-center gap-1">
+                    <Play className="w-3 h-3" />
+                    Active Booking
+                  </span>
+                )}
+              </div>
+              <button 
+                onClick={actions.closeDetails} 
+                className="text-gray-400 hover:text-gray-600 hover:bg-gray-100 p-1 rounded-full transition-colors"
+              >
+                <XCircle className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <div className="p-6">
+              {/* Conflict Warning in Modal */}
+              {conflictingBookings[selectedBooking.id] && (
+                <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
+                  <div className="flex items-start gap-3">
+                    <AlertTriangle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <h4 className="font-medium text-red-800 mb-2">Date Conflict Warning</h4>
+                      <p className="text-red-700 text-sm mb-3">
+                        This booking has overlapping dates with the following bookings:
+                      </p>
+                      <div className="space-y-2">
+                        {conflictingBookings[selectedBooking.id].map((conflict, index) => (
+                          <div key={index} className="bg-red-100 p-2 rounded text-sm">
+                            <p className="font-medium text-red-800">
+                              Client: {conflict.conflictingClient}
+                            </p>
+                            <p className="text-red-700">
+                              Dates: {conflict.conflictingDates}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="mt-3 p-3 bg-yellow-50 border border-yellow-200 rounded">
+                        <div className="flex items-center gap-2">
+                          <Info className="h-4 w-4 text-yellow-600" />
+                          <p className="text-yellow-800 text-sm font-medium">
+                            Recommendation: Review conflicting bookings before accepting to avoid double booking.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Active Status Information */}
+              {selectedBooking.status === 'Active' && (
+                <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg">
+                  <div className="flex items-start gap-3">
+                    <Play className="h-5 w-5 text-green-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <h4 className="font-medium text-green-800 mb-2">Active Booking</h4>
+                      <p className="text-green-700 text-sm mb-2">
+                        This booking is currently active and in progress.
+                      </p>
+                      {selectedBooking.activatedAt && (
+                        <p className="text-green-600 text-xs">
+                          Activated on: {helpers.formatDateTime(selectedBooking.activatedAt)}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Booking ID and Status */}
+              <div className="flex justify-between items-center mb-6">
+                <div>
+                  <p className="text-sm text-gray-500">Transaction ID</p>
+                  <p className="font-medium">{selectedBooking.transactionId || selectedBooking.id}</p>
+                </div>
+                {helpers.getStatusTag(selectedBooking.status, conflictingBookings[selectedBooking.id], selectedBooking)}
+              </div>
+              
+              {/* Customer Information */}
+              {helpers.renderSection("Customer Information", 
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {helpers.renderInfoField("Name", userData[selectedBooking.userId]?.fullName || selectedBooking.name || "Unknown User")}
+                  {helpers.renderInfoField("Email", userData[selectedBooking.userId]?.email || selectedBooking.email)}
+                  {helpers.renderInfoField("Phone", userData[selectedBooking.userId]?.contactNumber || selectedBooking.contactNumber || "Not available")}
+                  {helpers.renderInfoField("Address", userData[selectedBooking.userId]?.address || selectedBooking.address || "Not specified", <MapPin className="w-4 h-4 text-gray-400" />)}
+                </div>
+              )}
+              
+              {/* Deposit Information */}
+              {helpers.renderSection("Deposit Information", 
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-sm text-gray-500">Deposit Status</p>
+                    <div className="flex items-center gap-2">
+                      {helpers.getDepositBadge(selectedBooking.depositStatus) || 
+                        <span className="text-gray-500">Not set</span>}
+                    </div>
+                  </div>
+                  {selectedBooking.depositAmount && (
+                    <div>
+                      <p className="text-sm text-gray-500">Deposit Amount</p>
+                      <p className="font-medium flex items-center gap-1.5">
+                        <CreditCard className="w-4 h-4 text-gray-400" />
+                        ₱{selectedBooking.depositAmount}
+                      </p>
+                    </div>
+                  )}
+                  <div className="md:col-span-2">
+                    <button
+                      onClick={() => actions.updateDeposit(selectedBooking)}
+                      disabled={!["Pending", "Accepted", "Active"].includes(selectedBooking.status)}
+                      className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
+                        ["Pending", "Accepted", "Active"].includes(selectedBooking.status)
+                          ? "bg-purple-50 text-purple-600 hover:bg-purple-100"
+                          : "bg-gray-50 text-gray-400 cursor-not-allowed"
+                      }`}
+                    >
+                      <Wallet className="w-4 h-4" />
+                      Update Deposit Status
+                    </button>
+                  </div>
+                </div>
+              )}
+              
+              {/* Vehicle Information */}
+              {helpers.renderSection("Vehicle Information", 
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {helpers.renderInfoField("Vehicle", `${selectedBooking.vehicleBrand || ""} ${selectedBooking.vehicleModel || ""} ${selectedBooking.vehicleYear ? `(${selectedBooking.vehicleYear})` : ""}`)}
+                  {helpers.renderInfoField("License Plate", vehicleData[selectedBooking.vehicleId]?.carNumber)}
+                  {helpers.renderInfoField("Fuel Type", selectedBooking.fuelType)}
+                  {selectedBooking.hourlyRate && 
+                    helpers.renderInfoField("Hourly Rate", `₱${selectedBooking.hourlyRate}/hr`)}
+                </div>
+              )}
+              
+              {/* Booking Dates */}
+              {(() => {
+                const dates = helpers.getBookingDates(selectedBooking);
+                return helpers.renderSection("Booking Schedule", 
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <p className="text-sm text-gray-500">Pickup / Start Date</p>
+                      <p className="font-medium">{helpers.formatDate(dates.pickupDate)}</p>
+                      {dates.pickupTime && <p className="text-sm text-gray-500">
+                        <Clock className="w-3 h-3 inline mr-1" />
+                        {helpers.formatTime(dates.pickupTime)}
+                      </p>}
+                      {selectedBooking.status === 'Active' && (
+                        <p className="text-sm text-green-600 mt-1">
+                          <Play className="w-3 h-3 inline mr-1" />
+                          Started
+                        </p>
+                      )}
+                    </div>
+                    <div>
+                      <p className="text-sm text-gray-500">Return / End Date</p>
+                      <p className="font-medium">{helpers.formatDate(dates.dropoffDate)}</p>
+                      {dates.dropoffTime && <p className="text-sm text-gray-500">
+                        <Clock className="w-3 h-3 inline mr-1" />
+                        {helpers.formatTime(dates.dropoffTime)}
+                      </p>}
+                    </div>
+                    <div>
+                      <p className="text-sm text-gray-500">Pickup Location</p>
+                      <p className="font-medium">{dates.pickupLocation || "Not specified"}</p>
+                    </div>
+                    <div>
+                      <p className="text-sm text-gray-500">Dropoff Location</p>
+                      <p className="font-medium">{dates.dropoffLocation || "Not specified"}</p>
+                    </div>
+                  </div>
+                );
+              })()}
+              
+              {/* UPDATED Payment Information with Remaining Balance */}
+              {helpers.renderSection("Payment Information",  
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {helpers.renderInfoField("Base Price", `₱${selectedBooking.dailyPrice || selectedBooking.rentalAmount || 0}`)}
+                  
+                  {selectedBooking.depositAmount > 0 && selectedBooking.depositStatus === 'paid' && (
+                    <>
+                      <div>
+                        <p className="text-sm text-gray-500">Deposit Paid</p>
+                        <p className="font-medium text-green-600 flex items-center gap-1.5">
+                          <CreditCard className="w-4 h-4" />
+                          -₱{selectedBooking.depositAmount}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-sm text-gray-500">Remaining Balance</p>
+                        <p className="font-bold text-blue-600 flex items-center gap-1.5">
+                          <DollarSign className="w-4 h-4" />
+                          ₱{helpers.calculateRemainingBalance(selectedBooking)}
+                        </p>
+                      </div>
+                    </>
+                  )}
+                  
+                  {selectedBooking.status === "Overdue" && (
+                    <>
+                      {helpers.renderInfoField("Overdue Hours", selectedBooking.overdueHours || "0")}
+                      {helpers.renderInfoField(
+                        "Overdue Charges", 
+                        `₱${helpers.calculateOverdueAmount(selectedBooking)}`
+                      )}
+                    </>
+                  )}
+                  
+                  {helpers.renderInfoField(
+                    "Total Amount to Collect", 
+                    `₱${selectedBooking.status === "Overdue" 
+                      ? helpers.calculateRemainingBalance(selectedBooking) + helpers.calculateOverdueAmount(selectedBooking)
+                      : helpers.calculateRemainingBalance(selectedBooking)
+                    }`
+                  )}
+                  
+                  {selectedBooking.paymentProofUploadTimestamp && 
+                    helpers.renderInfoField("Payment Proof Uploaded", helpers.formatDateTime(selectedBooking.paymentProofUploadTimestamp))}
+                  {selectedBooking.proofOfPaymentUrl && ( 
+                    <div className="md:col-span-2">
+                      <p className="text-sm text-gray-500">Proof of Payment</p>
+                      <a href={selectedBooking.proofOfPaymentUrl} 
+                      target="_blank" 
+                      rel="noopener noreferrer" 
+                      className="text-blue-600 hover:underline flex items-center gap-1.5" >
+                        <FileText className="w-4 h-4" /> View Proof of Payment</a>
+                    </div>
+                  )} 
+                </div>
+              )}
+              
+              {/* Additional Notes */}
+              {selectedBooking.notes && helpers.renderSection("Additional Notes", 
+                <p className="text-gray-700">{selectedBooking.notes}</p>
+              )}
+              
+              {/* Auto-Cancellation Info */}
+              {selectedBooking.autoCancelled && helpers.renderSection("Auto-Cancellation Details",
+                <div className="bg-orange-50 p-3 rounded-lg border border-orange-200">
+                  <div className="flex items-start gap-2">
+                    <Calendar className="w-4 h-4 text-orange-600 mt-0.5" />
+                    <div>
+                      <p className="text-sm text-orange-800 font-medium">Automatically Cancelled</p>
+                      <p className="text-sm text-orange-700 mt-1">
+                        Reason: {selectedBooking.autoCancelReason || "Booking start date has passed"}
+                      </p>
+                      {selectedBooking.autoCancelledAt && (
+                        <p className="text-xs text-orange-600 mt-1">
+                          Cancelled on: {helpers.formatDateTime(selectedBooking.autoCancelledAt)}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+              
+              {/* UPDATED Actions for Active status support */}
+              <div className="border-t border-gray-100 pt-4 mt-6">
+                <div className="flex justify-between items-center">
+                  <button
+                    onClick={() => actions.updateDeposit(selectedBooking)}
+                    disabled={!["Pending", "Accepted", "Active"].includes(selectedBooking.status)}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-md transition-colors ${
+                      ["Pending", "Accepted", "Active"].includes(selectedBooking.status)
+                        ? "bg-purple-500 text-white hover:bg-purple-600"
+                        : "bg-gray-300 text-gray-500 cursor-not-allowed"
+                    }`}
+                  >
+                    <Wallet className="w-4 h-4" />
+                    Update Deposit
+                  </button>
+                  
+                  <div className="flex space-x-2">
+                    {selectedBooking.status === "Pending" && (
+                      <>
+                        <button 
+                          onClick={() => {
+                            actions.updateStatus(selectedBooking.id, "Accepted", selectedBooking);
+                            actions.closeDetails();
+                          }}
+                          className={`px-4 py-2 text-white rounded-md transition-colors flex items-center gap-2 ${
+                            conflictingBookings[selectedBooking.id] 
+                              ? "bg-orange-500 hover:bg-orange-600" 
+                              : "bg-green-500 hover:bg-green-600"
+                          }`}
+                        >
+                          {conflictingBookings[selectedBooking.id] && <AlertTriangle className="w-4 h-4" />}
+                          Accept Booking
+                        </button>
+                        <button 
+                          onClick={() => {
+                            actions.updateStatus(selectedBooking.id, "Cancelled", selectedBooking);
+                            actions.closeDetails();
+                          }}
+                          className="px-4 py-2 bg-red-500 text-white rounded-md hover:bg-red-600 transition-colors"
+                        >
+                          Cancel Booking
+                        </button>
+                      </>
+                    )}
+                    
+                    {(selectedBooking.status === "Active" || selectedBooking.status === "Overdue") && (
+                      <button 
+                        onClick={() => {
+                          actions.updateStatus(selectedBooking.id, "Completed", selectedBooking);
+                          actions.closeDetails();
+                        }}
+                        className="px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600 transition-colors flex items-center gap-2"
+                      >
+                        <CheckCircle2 className="w-4 h-4" />
+                        Mark as Completed
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default Bookings;
